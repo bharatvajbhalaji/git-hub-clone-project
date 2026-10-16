@@ -65,13 +65,15 @@ function renderConn() {
     html = `<div><span class="note">No YouTube account connected</span><div class="acct">Connect the Gmail account whose YouTube videos you want to review</div></div>
       <div class="actions"><a class="btn" href="/auth/google">Connect YouTube account</a><button class="btn ghost" id="cDemo">Load demo videos</button></div>`;
   } else {
-    html = `<div><span class="note">Google sign-in is not set up yet</span><div class="acct">Fill in config.json (see README) to connect a YouTube account</div></div>
-      <div class="actions"><button class="btn ghost" id="cDemo">Load demo videos</button></div>`;
+    html = `<div><span class="note">YouTube account</span><div class="acct">Not connected</div>
+      <span class="note">Connecting needs a one-time Google sign-in setup by the app owner. Until then, try the app with demo videos.</span></div>
+      <div class="actions"><button class="btn" id="cNeedSetup">Connect YouTube account</button><button class="btn ghost" id="cDemo">Load demo videos</button></div>`;
   }
   if (s.lastSyncResult) html += `<details><summary>Last sync details</summary>${s.lastSyncResult.map(esc).join("<br>")}</details>`;
   $("conn").innerHTML = html;
   $("cSync") && ($("cSync").onclick = async () => { try { await api("/api/admin/sync", { method: "POST" }); toast("Sync started"); adminRefresh(); } catch (e) { toast(e.message); } });
   $("cDisc") && ($("cDisc").onclick = async () => { await api("/api/admin/disconnect", { method: "POST" }); toast("Disconnected"); adminRefresh(); });
+  $("cNeedSetup") && ($("cNeedSetup").onclick = () => toast("Google sign-in is not set up on this server yet. Add the Google client ID and secret, then this button signs you in."));
   $("cDemo") && ($("cDemo").onclick = async () => { await api("/api/admin/demo", { method: "POST" }); toast("Demo videos loaded into the review list"); adminRefresh(); });
 }
 
