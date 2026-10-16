@@ -1,0 +1,9 @@
+{
+  "googleClientId": "PASTE-YOUR-CLIENT-ID.apps.googleusercontent.com",
+  "googleClientSecret": "PASTE-YOUR-CLIENT-SECRET",
+  "redirectUri": "http://localhost:3000/auth/google/callback",
+  "region": "IN",
+  "videosPerChannel": 10,
+  "trendingPerCategory": 25,
+  "autoSyncHours": 6
+}

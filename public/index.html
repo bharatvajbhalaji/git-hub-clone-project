@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VidGate</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Figtree:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><i>▶</i>VidGate</div>
+    <div id="who" hidden><span id="whoName"></span> <span class="pill" id="whoRole"></span> <button class="link" id="logout">Log out</button></div>
+  </header>
+  <div class="toast" id="toast" hidden></div>
+
+  <!-- LOGIN -->
+  <section id="login" class="panel narrow" hidden>
+    <h2>Log in</h2>
+    <form id="loginForm">
+      <label for="lu">Username</label><input id="lu" autocomplete="username" required>
+      <label for="lp">Password</label><input id="lp" type="password" autocomplete="current-password" required>
+      <button class="btn">Log in</button>
+      <div class="err" id="loginErr" hidden></div>
+    </form>
+    <p class="note">First run: admin / admin123 · student / student123</p>
+  </section>
+
+  <!-- ADMIN -->
+  <section id="admin" hidden>
+    <div class="panel conn" id="conn"></div>
+
+    <div class="tabs" id="tabs">
+      <button data-tab="pending" aria-pressed="true">To review <span class="n" id="nPending">0</span></button>
+      <button data-tab="approved" aria-pressed="false">Approved <span class="n" id="nApproved">0</span></button>
+      <button data-tab="rejected" aria-pressed="false">Rejected <span class="n" id="nRejected">0</span></button>
+      <button data-tab="search" aria-pressed="false">Search YouTube</button>
+      <button data-tab="rules" aria-pressed="false">Channel rules</button>
+      <button data-tab="users" aria-pressed="false">Users</button>
+    </div>
+
+    <!-- review lists -->
+    <div id="pane-list">
+      <div class="filters">
+        <input id="fq" placeholder="Filter by title or channel">
+        <select id="fsource"><option value="">All sources</option></select>
+        <select id="fcat"><option value="">All categories</option></select>
+      </div>
+      <div class="bulk">
+        <label class="chk"><input type="checkbox" id="selAll"> Select all shown</label>
+        <span class="note" id="selCount">0 selected</span>
+        <button class="btn ok" id="bApprove">Approve selected</button>
+        <button class="btn bad" id="bReject">Reject selected</button>
+        <button class="btn ghost" id="bPending" hidden>Move back to review</button>
+      </div>
+      <div class="agrid" id="agrid"></div>
+      <button class="btn ghost more" id="more" hidden>Show more</button>
+    </div>
+
+    <!-- search -->
+    <div id="pane-search" hidden>
+      <form class="filters" id="sForm">
+        <input id="sq" placeholder="Search all of YouTube">
+        <button class="btn">Search</button>
+      </form>
+      <p class="note">Results join the review queue. Each search uses 100 of the 10,000 daily YouTube API units.</p>
+      <div class="err" id="sErr" hidden></div>
+      <div class="agrid" id="sgrid"></div>
+    </div>
+
+    <!-- rules -->
+    <div id="pane-rules" class="panel" hidden>
+      <h2>Channel rules</h2>
+      <p class="note">Set a rule from any video card ("Always approve channel" / "Always reject channel"). New videos from that channel are decided automatically on every sync.</p>
+      <ul class="ulist" id="rlist"></ul>
+    </div>
+
+    <!-- users -->
+    <div id="pane-users" class="panel" hidden>
+      <h2>User accounts</h2>
+      <form class="filters" id="userForm">
+        <input id="nu" placeholder="Username" required>
+        <input id="np" type="password" placeholder="Password (min 6)" required>
+        <select id="nr"><option value="user">User</option><option value="admin">Administrator</option></select>
+        <button class="btn">Create account</button>
+      </form>
+      <div class="err" id="userErr" hidden></div>
+      <ul class="ulist" id="ulist"></ul>
+    </div>
+  </section>
+
+  <!-- USER -->
+  <section id="user" hidden>
+    <div id="playerArea"></div>
+    <input class="search" id="q" placeholder="Search videos">
+    <div class="chips" id="chips"></div>
+    <div class="grid" id="grid"></div>
+  </section>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
