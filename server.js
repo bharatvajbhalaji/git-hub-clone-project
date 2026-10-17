@@ -345,26 +345,30 @@ const PACKS = {
   "TV Shows & Serials": ["Sun TV", "Vijay Television", "Zee Tamil", "Colors Tamil", "Kalaignar TV", "Raj Television", "Jaya TV", "Polimer TV"],
   "Sports": ["Star Sports Tamil", "Chennai Super Kings", "BCCI", "ICC", "Pro Kabaddi League", "Indian Super League", "Sony Sports Network", "Olympics"],
 };
+// Channel ids confirmed from YouTube search results (no search needed for these)
+const KNOWN = {
+  "Thanthi TV": "UC-JFyL0zDFOsPMpuWu39rPA", "Polimer News": "UC8Z-VjXBtDJTvq6aqkIskPg",
+  "Puthiya Thalaimurai TV": "UCmyKnNRH0wH-r8I-ceP-dsg", "Sun News Tamil": "UCYlh4lH762HvHt6mmiecyWQ",
+  "News18 Tamil Nadu": "UCat88i6_rELqI_prwvjspRA",
+  "Jump Cuts Hari Baskar": "UCpPOf9BQPwa4K11Zjxu1ZPw", "Temple Monkeys": "UCx2SxlhDYl8Rhkw_PqwcdSA",
+  "Madras Central": "UCGBnz-FR3qaowYsyIEh2-zw", "Black Sheep Tamil": "UCzh5hQc_O3r3xjh9sXrM7-A",
+  "Sun TV": "UCBnxEdpoZwstJqC1yZpOjRA",
+  "Star Sports Tamil": "UCDZ0EABqiGGIEsbZ4SXVj1g", "Chennai Super Kings": "UC2J_VKrAzOEJuQvFFtj3KUw",
+  "BCCI": "UCsGPbuVbgBDSf0Efw1OAb0Q", "ICC": "UCt2JXOLNxqry7B_4rRZME3Q", "Pro Kabaddi League": "UCL7l6c635bbxWkH7Gofbb-A",
+};
+const SEED_VERSION = 2;
 // Adds every suggested channel (used once when the app starts with no channels)
 async function seedPacks() {
-  const d = db(), added = [], missed = [];
-  console.log("Adding suggested channels from YouTube search…");
-  for (const [cat, names] of Object.entries(PACKS)) {
-    console.log("  searching " + cat);
-    for (const name of names) {
-      try {
-        const c = await retry(() => searchChannel(name));
-        if (!c) { missed.push(name); continue; }
-        if (!d.channels[c.id]) d.channels[c.id] = { title: c.title, category: cat, addedAt: new Date().toISOString(), lastChecked: null, error: null };
-        added.push(`${cat}: ${name} -> ${c.title} (${c.id})`);
-      } catch (e) { missed.push(`${name} (${e.cause?.code || e.message})`); }
-      await wait(900);
-    }
+  const d = db(), added = [];
+  for (const [cat, names] of Object.entries(PACKS)) for (const name of names) {
+    const id = KNOWN[name];
+    if (!id || d.channels[id]) continue;
+    d.channels[id] = { title: name, category: cat, addedAt: new Date().toISOString(), lastChecked: null, error: null };
+    added.push(`${cat}: ${name}`);
   }
-  d.seeded = true;
+  d.seeded = SEED_VERSION;
   save();
   console.log(`Suggested channels added: ${added.length}`); added.forEach(a => console.log("  " + a));
-  if (missed.length) console.log("Not found: " + missed.join(", "));
   await checkChannels();
   console.log("First check: " + d.lastFeedResult);
   const bad = Object.values(d.channels).filter(c => c.error);
@@ -564,6 +568,7 @@ app.post("/api/admin/channels/find", needLogin, needAdmin, wrap(async (req, res)
   const out = [];
   for (const group of chunk(names, 2)) {
     out.push(...await Promise.all(group.map(async name => {
+      if (KNOWN[name]) return { name, id: KNOWN[name], title: db().channels[KNOWN[name]]?.title || name, subscribers: "", already: !!db().channels[KNOWN[name]] };
       try { const c = await retry(() => searchChannel(name)); return c ? { name, ...c, already: !!db().channels[c.id] } : { name, notFound: true }; }
       catch { return { name, notFound: true }; }
     })));
@@ -648,7 +653,7 @@ app.get("/api/videos", needLogin, (req, res) => {
 init().then(() => app.listen(PORT, () => {
   console.log(pg ? "Saving data to Postgres." : "Saving data to data.json.");
   setInterval(() => { if (feedStale()) checkChannels().catch(() => {}); }, 10 * 60000);
-  if (process.env.SEED_PACKS === "1" && !db().seeded && !Object.keys(db().channels).length)
+  if (process.env.SEED_PACKS === "1" && (db().seeded || 0) < SEED_VERSION)
     seedPacks().catch(e => console.error("Adding suggested channels failed:", e.message));
   console.log(`VidGate running → http://localhost:${PORT}`);
   console.log("Logins: admin (password from ADMIN_PASSWORD, default admin123) · student / student123");
