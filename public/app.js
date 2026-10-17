@@ -36,7 +36,7 @@ $("loginForm").addEventListener("submit", async e => {
 $("logout").onclick = async () => { await api("/api/logout", { method: "POST" }); boot(); };
 
 // ================= ADMIN =================
-let tab = "pending", list = [], sel = new Set(), limit = 60, status = null, pollT = null;
+let tab = "pending", list = [], sel = new Set(), limit = 60, status = null, pollT = null, wasBusy = false;
 
 async function adminRefresh() {
   status = await api("/api/admin/status");
@@ -44,11 +44,15 @@ async function adminRefresh() {
   $("nPending").textContent = status.counts.pending;
   $("nApproved").textContent = status.counts.approved;
   $("nRejected").textContent = status.counts.rejected;
+  $("nChannels").textContent = status.channelCount;
+  document.querySelector('#tabs [data-tab="search"]').hidden = !status.account;
   fillSelect("fsource", "All sources", status.sources);
   fillSelect("fcat", "All categories", status.categories);
   if (["pending", "approved", "rejected"].includes(tab)) await loadList();
   clearTimeout(pollT);
-  if (status.syncing) pollT = setTimeout(adminRefresh, 4000);
+  if (status.syncing || status.checking) pollT = setTimeout(adminRefresh, 4000);
+  else if (wasBusy && tab === "channels") loadChannels();
+  wasBusy = status.syncing || status.checking;
 }
 function fillSelect(id, label, items) {
   const cur = $(id).value;
@@ -56,25 +60,32 @@ function fillSelect(id, label, items) {
 }
 function renderConn() {
   const s = status;
-  let html;
-  if (s.account) {
-    html = `<div><span class="note">Connected YouTube account</span><div class="acct">${esc(s.account)}</div>
-      <span class="note">${s.syncing ? "Syncing now…" : "Last sync " + ago(s.lastSync)}</span></div>
-      <div class="actions"><button class="btn" id="cSync" ${s.syncing ? "disabled" : ""}>Sync now</button><button class="btn ghost" id="cDisc">Disconnect</button></div>`;
-  } else if (s.googleConfigured) {
-    html = `<div><span class="note">No YouTube account connected</span><div class="acct">Connect the Gmail account whose YouTube videos you want to review</div></div>
-      <div class="actions"><a class="btn" href="/auth/google">Connect YouTube account</a><button class="btn ghost" id="cDemo">Load demo videos</button></div>`;
-  } else {
-    html = `<div><span class="note">YouTube account</span><div class="acct">Not connected</div>
-      <span class="note">Connecting needs a one-time Google sign-in setup by the app owner. Until then, try the app with demo videos.</span></div>
-      <div class="actions"><button class="btn" id="cNeedSetup">Connect YouTube account</button><button class="btn ghost" id="cDemo">Load demo videos</button></div>`;
-  }
-  if (s.lastSyncResult) html += `<details><summary>Last sync details</summary>${s.lastSyncResult.map(esc).join("<br>")}</details>`;
+  const feeds = s.channelCount
+    ? `${s.channelCount} channel${s.channelCount === 1 ? "" : "s"} · ${s.checking ? "checking for new videos…" : "last checked " + ago(s.lastFeedCheck)}`
+    : "No channels yet";
+  let html = `<div><span class="note">Videos come from</span><div class="acct">${esc(feeds)}</div>
+      ${s.account ? `<span class="note">Also connected: ${esc(s.account)} · ${s.syncing ? "syncing…" : "synced " + ago(s.lastSync)}</span>` : ""}</div>
+    <div class="actions">
+      ${s.channelCount ? `<button class="btn" id="cCheck" ${s.checking ? "disabled" : ""}>Check for new videos</button>` : `<button class="btn" id="cGoCh">Add YouTube channels</button>`}
+      <button class="btn ghost" id="cGoCh2">Manage channels</button>
+      ${s.account ? `<button class="btn ghost" id="cSync" ${s.syncing ? "disabled" : ""}>Sync Google account</button><button class="btn ghost" id="cDisc">Disconnect</button>`
+        : s.googleConfigured ? `<a class="btn ghost" href="/auth/google">Connect Google account</a>` : ""}
+      ${!s.channelCount && !s.counts.pending && !s.counts.approved ? `<button class="btn ghost" id="cDemo">Load demo videos</button>` : ""}
+    </div>`;
+  const details = [s.lastFeedResult, ...(s.lastSyncResult || [])].filter(Boolean);
+  if (details.length) html += `<details><summary>Last check details</summary>${details.map(esc).join("<br>")}</details>`;
   $("conn").innerHTML = html;
+  const goCh = () => document.querySelector('#tabs [data-tab="channels"]').click();
+  $("cGoCh") && ($("cGoCh").onclick = goCh);
+  $("cGoCh2").onclick = goCh;
+  $("cCheck") && ($("cCheck").onclick = startCheck);
   $("cSync") && ($("cSync").onclick = async () => { try { await api("/api/admin/sync", { method: "POST" }); toast("Sync started"); adminRefresh(); } catch (e) { toast(e.message); } });
   $("cDisc") && ($("cDisc").onclick = async () => { await api("/api/admin/disconnect", { method: "POST" }); toast("Disconnected"); adminRefresh(); });
-  $("cNeedSetup") && ($("cNeedSetup").onclick = () => toast("Google sign-in is not set up on this server yet. Add the Google client ID and secret, then this button signs you in."));
   $("cDemo") && ($("cDemo").onclick = async () => { await api("/api/admin/demo", { method: "POST" }); toast("Demo videos loaded into the review list"); adminRefresh(); });
+}
+async function startCheck() {
+  try { await api("/api/admin/channels/check", { method: "POST" }); toast("Checking channels for new videos…"); adminRefresh(); }
+  catch (e) { toast(e.message); }
 }
 
 $("tabs").onclick = e => {
@@ -84,6 +95,8 @@ $("tabs").onclick = e => {
   $("pane-list").hidden = !["pending", "approved", "rejected"].includes(tab);
   $("pane-search").hidden = tab !== "search";
   $("pane-rules").hidden = tab !== "rules";
+  $("pane-channels").hidden = tab !== "channels";
+  if (tab === "channels") loadChannels();
   $("pane-users").hidden = tab !== "users";
   if (tab === "rules") loadRules();
   if (tab === "users") loadUsers();
@@ -174,6 +187,61 @@ async function loadRules() {
     <span class="pill">${r.rule === "approve" ? "Always approve" : "Always reject"}</span>
     <button class="btn ghost" data-unrule="${esc(r.channelId)}">Remove rule</button></li>`).join("") : `<li class="note">No rules yet.</li>`;
 }
+
+// channels
+async function loadChannels() {
+  const chs = await api("/api/admin/channels");
+  $("chInfo").textContent = status?.lastFeedResult ? status.lastFeedResult + " · " + ago(status.lastFeedCheck) : "";
+  $("chList").innerHTML = chs.length ? chs.map(c => `<li class="chrow">
+      <div class="chmain"><a href="https://www.youtube.com/channel/${esc(c.id)}" target="_blank" rel="noopener"><b>${esc(c.title)}</b></a>
+        <div class="note">${c.pending} waiting · ${c.approved} approved${c.rule ? " · always " + c.rule : ""}${c.error ? ` · <span class="errtxt">${esc(c.error)}</span>` : c.lastChecked ? "" : " · not checked yet"}</div></div>
+      <input class="chcat" data-cat="${esc(c.id)}" value="${esc(c.category || "General")}" aria-label="Category for ${esc(c.title)}">
+      <button class="btn ghost" data-unch="${esc(c.id)}" data-t="${esc(c.title)}">Remove</button></li>`).join("")
+    : `<li class="note">No channels yet. Add one above, or bring in a whole subscriptions list.</li>`;
+}
+$("chForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  showErr("chErr");
+  $("chAdd").disabled = true; $("chAdd").textContent = "Adding…";
+  try {
+    const r = await api("/api/admin/channels", { method: "POST", body: { input: $("chIn").value, category: $("chCat").value || "General" } });
+    $("chIn").value = "";
+    toast(`${r.title} added · ${r.added} video${r.added === 1 ? "" : "s"} waiting for review`);
+    adminRefresh(); loadChannels();
+  } catch (err) { showErr("chErr", err.message); }
+  $("chAdd").disabled = false; $("chAdd").textContent = "Add channel";
+});
+$("chFile").addEventListener("change", async e => {
+  const f = e.target.files[0]; if (!f) return;
+  showErr("impErr");
+  try {
+    let csv;
+    if (/\.zip$/i.test(f.name) || f.type.includes("zip")) {
+      if (!window.JSZip) throw new Error("Could not open zip files here. Unzip it and choose subscriptions.csv instead.");
+      const zip = await JSZip.loadAsync(f);
+      const entry = Object.values(zip.files).find(z => /subscriptions[^/]*\.csv$/i.test(z.name));
+      if (!entry) throw new Error("No subscriptions file in that zip. In Takeout, make sure 'subscriptions' is ticked under YouTube.");
+      csv = await entry.async("string");
+    } else csv = await f.text();
+    const r = await api("/api/admin/channels/import", { method: "POST", body: { csv, category: $("chCat").value || "General" } });
+    toast(`${r.found} subscriptions found · ${r.added} new channels added · fetching their videos…`);
+    e.target.value = "";
+    adminRefresh(); loadChannels();
+  } catch (err) { showErr("impErr", err.message); }
+});
+$("chCheck").onclick = startCheck;
+$("chList").addEventListener("change", async e => {
+  const id = e.target.dataset.cat; if (!id) return;
+  await api("/api/admin/channels/" + encodeURIComponent(id), { method: "PATCH", body: { category: e.target.value || "General" } });
+  toast("Category saved");
+});
+$("chList").addEventListener("click", async e => {
+  const b = e.target.closest("[data-unch]"); if (!b) return;
+  if (b.dataset.sure !== "1") { b.dataset.sure = "1"; b.textContent = "Tap again to remove"; setTimeout(() => { b.dataset.sure = ""; b.textContent = "Remove"; }, 3000); return; }
+  await api("/api/admin/channels/" + encodeURIComponent(b.dataset.unch), { method: "DELETE" });
+  toast(`${b.dataset.t} removed. Its approved videos stay; waiting ones were cleared.`);
+  adminRefresh(); loadChannels();
+});
 
 // users
 async function loadUsers() {

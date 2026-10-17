@@ -73,3 +73,12 @@ input,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-ra
 .ulist{list-style:none;padding:0;margin:0}
 .ulist li{padding:10px 0;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 a.btn{text-decoration:none;display:inline-block}
+.import{margin-top:12px;font-size:.9rem}
+.import summary{cursor:pointer;font-weight:600;color:var(--accent)}
+.import ol{padding-left:20px;line-height:1.7}
+.chrow{display:grid!important;grid-template-columns:minmax(0,1fr) 150px auto;gap:10px;align-items:center}
+@media (max-width:600px){.chrow{grid-template-columns:minmax(0,1fr) auto}.chrow .chcat{grid-column:1/-1;grid-row:2}}
+.chmain{min-width:0}.chmain a{color:inherit;text-decoration:none;overflow-wrap:anywhere}
+.chcat{padding:7px 10px}
+.errtxt{color:var(--warn)}
+details summary{cursor:pointer}

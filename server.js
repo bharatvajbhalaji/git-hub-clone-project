@@ -43,28 +43,49 @@ function verify(pw, stored) {
   const t = crypto.scryptSync(pw, salt, 64).toString("hex");
   return crypto.timingSafeEqual(Buffer.from(h, "hex"), Buffer.from(t, "hex"));
 }
-let DB;
-function db() {
-  if (DB) return DB;
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({
-      users: [
-        { id: 1, username: "admin", password: hash(process.env.ADMIN_PASSWORD || "admin123"), role: "admin" },
-        { id: 2, username: "student", password: hash("student123"), role: "user" },
-      ],
-      nextUserId: 3,
-      videos: {},          // youtubeId -> video
-      channelRules: {},    // channelId -> { title, rule: "approve" | "reject" }
-      categories: {},      // categoryId -> name
-      google: null,        // { email, refreshToken, accessToken, expiry }
-      lastSync: null,
-      lastSyncResult: null,
-    }, null, 2));
+// Data lives in memory and is saved to Postgres when DATABASE_URL is set (hosting),
+// otherwise to data.json (your own computer).
+let DB, pg;
+const blank = () => ({
+  users: [
+    { id: 1, username: "admin", password: hash(process.env.ADMIN_PASSWORD || "admin123"), role: "admin" },
+    { id: 2, username: "student", password: hash("student123"), role: "user" },
+  ],
+  nextUserId: 3,
+  videos: {},          // youtubeId -> video
+  channels: {},        // channelId -> { title, category, addedAt, lastChecked, error }
+  channelRules: {},    // channelId -> { title, rule: "approve" | "reject" }
+  categories: {},      // categoryId -> name
+  google: null,        // { email, refreshToken, accessToken, expiry }
+  lastSync: null, lastSyncResult: null,
+  lastFeedCheck: null, lastFeedResult: null,
+});
+async function init() {
+  let stored = null;
+  if (process.env.DATABASE_URL) {
+    const { Pool } = require("pg");
+    const url = process.env.DATABASE_URL;
+    pg = new Pool({ connectionString: url, ssl: /render\.com/.test(url) ? { rejectUnauthorized: false } : undefined });
+    await pg.query("create table if not exists vidgate_store (k text primary key, v jsonb not null)");
+    stored = (await pg.query("select v from vidgate_store where k = 'db'")).rows[0]?.v || null;
+  } else if (fs.existsSync(DB_FILE)) {
+    stored = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
   }
-  DB = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-  return DB;
+  DB = { ...blank(), ...(stored || {}) };
+  save();
 }
-function save() { fs.writeFileSync(DB_FILE, JSON.stringify(DB, null, 2)); }
+function db() { return DB; }
+let saveT, saveChain = Promise.resolve();
+function save() {
+  if (!pg) { fs.writeFileSync(DB_FILE, JSON.stringify(DB)); return; }
+  clearTimeout(saveT);
+  saveT = setTimeout(() => {
+    const json = JSON.stringify(DB);
+    saveChain = saveChain
+      .then(() => pg.query("insert into vidgate_store (k, v) values ('db', $1) on conflict (k) do update set v = excluded.v", [json]))
+      .catch(e => console.error("Saving to database failed:", e.message));
+  }, 300);
+}
 
 // ---------------- helpers ----------------
 function youtubeId(input) {
@@ -215,6 +236,101 @@ async function sync() {
   } finally { syncing = false; }
 }
 
+// ---------------- channel feeds (no Google sign-in needed) ----------------
+// Every YouTube channel publishes a public feed of its latest ~15 videos.
+const UA = { "User-Agent": "Mozilla/5.0 (compatible; VidGate/1.0)", "Accept-Language": "en-US,en;q=0.8" };
+const unxml = s => String(s || "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+  .replace(/&#39;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, "&");
+
+// Accepts a channel link, @handle, channel id, or a video link; returns the channel id.
+async function resolveChannel(input) {
+  input = String(input || "").trim();
+  let m = input.match(/(UC[A-Za-z0-9_-]{22})/);
+  if (m) return m[1];
+  let url;
+  if (/youtu\.be\/|watch\?|\/shorts\//.test(input)) {
+    const vid = youtubeId(input);
+    if (!vid) return null;
+    const r = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${vid}&format=json`, { headers: UA });
+    if (!r.ok) return null;
+    url = (await r.json()).author_url;
+  } else if (/^https?:\/\/(www\.|m\.)?youtube\.com\//.test(input)) url = input.replace("://m.", "://www.");
+  else if (/^@?[\w.-]{3,}$/.test(input)) url = "https://www.youtube.com/" + (input.startsWith("@") ? input : "@" + input);
+  else return null;
+  const r = await fetch(url, { headers: UA });
+  if (!r.ok) return null;
+  const html = await r.text();
+  m = html.match(/<meta itemprop="identifier" content="(UC[\w-]{22})"/) || html.match(/"externalId":"(UC[\w-]{22})"/)
+    || html.match(/youtube\.com\/channel\/(UC[\w-]{22})/) || html.match(/"channelId":"(UC[\w-]{22})"/);
+  return m ? m[1] : null;
+}
+
+async function fetchFeed(channelId) {
+  const r = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { headers: UA });
+  if (!r.ok) throw new Error(r.status === 404 ? "Channel not found" : `YouTube answered ${r.status}`);
+  const xml = await r.text();
+  const head = xml.split("<entry>")[0];
+  const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].map(([, e]) => ({
+    id: (e.match(/<yt:videoId>([^<]+)/) || [])[1],
+    title: unxml((e.match(/<title>([^<]*)/) || [])[1]),
+    publishedAt: (e.match(/<published>([^<]+)/) || [])[1],
+    views: +((e.match(/<media:statistics views="(\d+)"/) || [])[1] || 0),
+    isShort: /youtube\.com\/shorts\//.test(e),
+  })).filter(x => x.id);
+  return { title: unxml((head.match(/<title>([^<]*)/) || [])[1]), entries };
+}
+
+let checking = false;
+async function checkChannels(ids) {
+  if (checking) return 0;
+  checking = true;
+  const d = db(), list = (ids || Object.keys(d.channels)).filter(id => d.channels[id]);
+  let added = 0, failed = 0;
+  try {
+    for (const group of chunk(list, 6)) {
+      await Promise.all(group.map(async cid => {
+        const ch = d.channels[cid];
+        try {
+          const f = await fetchFeed(cid);
+          if (f.title) ch.title = f.title;
+          ch.lastChecked = new Date().toISOString(); ch.error = null;
+          const src = `Channel: ${ch.title}`;
+          for (const e of f.entries) {
+            const ex = d.videos[e.id];
+            if (ex) { if (!ex.sources.includes(src)) ex.sources.push(src); if (e.views) ex.views = e.views; continue; }
+            const rule = d.channelRules[cid]?.rule;
+            d.videos[e.id] = {
+              id: e.id, title: e.title, channelId: cid, channel: ch.title, categoryId: "", category: ch.category || "General",
+              duration: e.isShort ? "Short" : "", publishedAt: e.publishedAt, views: e.views, sources: [src],
+              status: rule === "approve" ? "approved" : rule === "reject" ? "rejected" : "pending",
+              decidedBy: rule ? "channel rule" : null, addedAt: new Date().toISOString(),
+            };
+            added++;
+          }
+        } catch (err) { ch.error = err.message; failed++; }
+      }));
+    }
+    d.lastFeedCheck = new Date().toISOString();
+    d.lastFeedResult = `${list.length} channel${list.length === 1 ? "" : "s"} checked · ${added} new video${added === 1 ? "" : "s"}${failed ? ` · ${failed} could not be read` : ""}`;
+    save();
+  } finally { checking = false; }
+  return added;
+}
+const feedStale = () => Object.keys(db().channels).length && !checking &&
+  (!db().lastFeedCheck || Date.now() - new Date(db().lastFeedCheck) > 60 * 60000);
+
+// Google Takeout subscriptions.csv: "Channel Id,Channel Url,Channel Title"
+function parseSubscriptions(csv) {
+  const out = [];
+  for (const line of String(csv || "").split(/\r?\n/)) {
+    const id = (line.match(/(UC[A-Za-z0-9_-]{22})/) || [])[1];
+    if (!id) continue;
+    const parts = line.split(",");
+    out.push({ id, title: parts.slice(2).join(",").replace(/^"|"$/g, "").trim() || id });
+  }
+  return out;
+}
+
 // ---------------- demo feed (no Google account needed) ----------------
 function loadDemo() {
   const d = db();
@@ -306,7 +422,10 @@ app.post("/api/admin/disconnect", needLogin, needAdmin, (req, res) => { db().goo
 app.get("/api/admin/status", needLogin, needAdmin, (req, res) => {
   const d = db(), vs = Object.values(d.videos);
   const count = s => vs.filter(v => v.status === s).length;
+  if (feedStale()) checkChannels().catch(() => {});   // hourly refresh when the admin opens the app
   res.json({
+    channelCount: Object.keys(d.channels).length, checking,
+    lastFeedCheck: d.lastFeedCheck, lastFeedResult: d.lastFeedResult,
     googleConfigured, account: d.google ? d.google.email : null, syncing,
     lastSync: d.lastSync, lastSyncResult: d.lastSyncResult,
     counts: { pending: count("pending"), approved: count("approved"), rejected: count("rejected") },
@@ -357,13 +476,69 @@ app.post("/api/admin/videos", needLogin, needAdmin, wrap(async (req, res) => {
   if (db().videos[id]) return res.status(409).json({ error: "This video is already in the list." });
   if (db().google) { await upsertVideos(new Map([[id, new Set(["Added by link"])]])); }
   else {
-    db().videos[id] = { id, title: req.body.title || "Video " + id, channel: "", channelId: "", categoryId: "", category: "Other",
+    const info = await fetchInfo(id);
+    db().videos[id] = { id, title: req.body.title || info?.title || "Video " + id, channel: info?.channel || "", channelId: "", categoryId: "", category: req.body.category || "General",
       duration: "", publishedAt: new Date().toISOString(), views: 0, sources: ["Added by link"], status: "pending",
       decidedBy: null, addedAt: new Date().toISOString() };
     save();
   }
   res.json(db().videos[id] || { error: "YouTube did not return this video." });
 }));
+
+// channels the admin follows (works without Google sign-in)
+app.get("/api/admin/channels", needLogin, needAdmin, (req, res) => {
+  const d = db(), vs = Object.values(d.videos);
+  res.json(Object.entries(d.channels).map(([id, c]) => ({
+    id, ...c, rule: d.channelRules[id]?.rule || null,
+    pending: vs.filter(v => v.channelId === id && v.status === "pending").length,
+    approved: vs.filter(v => v.channelId === id && v.status === "approved").length,
+  })).sort((a, b) => a.title.localeCompare(b.title)));
+});
+app.post("/api/admin/channels", needLogin, needAdmin, wrap(async (req, res) => {
+  const id = await resolveChannel(req.body?.input);
+  if (!id) return res.status(400).json({ error: "Could not find that channel. Paste the channel's link (youtube.com/@name) or one of its video links." });
+  const d = db();
+  if (d.channels[id]) return res.status(409).json({ error: `${d.channels[id].title} is already in your list.` });
+  d.channels[id] = { title: id, category: req.body.category || "General", addedAt: new Date().toISOString(), lastChecked: null, error: null };
+  try { await fetchFeed(id); } catch (e) { delete d.channels[id]; return res.status(400).json({ error: "YouTube did not return videos for that channel: " + e.message }); }
+  const wasChecking = checking;
+  const added = wasChecking ? 0 : await checkChannels([id]);
+  res.json({ id, title: d.channels[id].title, added });
+}));
+app.post("/api/admin/channels/import", needLogin, needAdmin, (req, res) => {
+  const subs = parseSubscriptions(req.body?.csv);
+  if (!subs.length) return res.status(400).json({ error: "No channels found in that file. Choose the subscriptions.csv file (or the whole Takeout zip)." });
+  const d = db(), fresh = [];
+  for (const s of subs) if (!d.channels[s.id]) {
+    d.channels[s.id] = { title: s.title, category: req.body.category || "General", addedAt: new Date().toISOString(), lastChecked: null, error: null };
+    fresh.push(s.id);
+  }
+  save();
+  checkChannels(fresh).catch(() => {});
+  res.json({ found: subs.length, added: fresh.length });
+});
+app.patch("/api/admin/channels/:id", needLogin, needAdmin, (req, res) => {
+  const d = db(), ch = d.channels[req.params.id];
+  if (!ch) return res.status(404).json({ error: "Channel not found." });
+  if (req.body?.category) {
+    ch.category = String(req.body.category).slice(0, 40);
+    for (const v of Object.values(d.videos)) if (v.channelId === req.params.id) v.category = ch.category;
+  }
+  save();
+  res.json(ch);
+});
+app.delete("/api/admin/channels/:id", needLogin, needAdmin, (req, res) => {
+  const d = db();
+  delete d.channels[req.params.id];
+  for (const [vid, v] of Object.entries(d.videos)) if (v.channelId === req.params.id && v.status === "pending") delete d.videos[vid];
+  save();
+  res.json({ ok: true });
+});
+app.post("/api/admin/channels/check", needLogin, needAdmin, (req, res) => {
+  if (!Object.keys(db().channels).length) return res.status(400).json({ error: "Add a channel first." });
+  checkChannels().catch(() => {});
+  res.json({ started: true });
+});
 
 // channel rules: always approve / always reject a channel's videos
 app.get("/api/admin/rules", needLogin, needAdmin, (req, res) =>
@@ -402,10 +577,11 @@ app.get("/api/videos", needLogin, (req, res) => {
   res.json(list);
 });
 
-app.listen(PORT, () => {
-  db();
+init().then(() => app.listen(PORT, () => {
+  console.log(pg ? "Saving data to Postgres." : "Saving data to data.json.");
+  setInterval(() => { if (feedStale()) checkChannels().catch(() => {}); }, 10 * 60000);
   console.log(`VidGate running → http://localhost:${PORT}`);
-  console.log("Admin: admin / admin123    User: student / student123");
+  console.log("Logins: admin (password from ADMIN_PASSWORD, default admin123) · student / student123");
   console.log(googleConfigured ? "Google sign-in configured." : "Google not configured yet — fill config.json to connect a YouTube account. Demo feed works without it.");
   if (cfg.autoSyncHours > 0) setInterval(() => { if (db().google) sync().catch(() => {}); }, cfg.autoSyncHours * 3600000);
-});
+})).catch(e => { console.error("Could not start:", e.message); process.exit(1); });
