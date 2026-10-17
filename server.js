@@ -269,6 +269,16 @@ async function resolveChannel(input) {
   return m ? m[1] : null;
 }
 
+// Title + channel of one video from YouTube oEmbed (no key needed)
+async function fetchInfo(id) {
+  try {
+    const r = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`, { headers: UA, signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return { title: j.title, channel: j.author_name, channelUrl: j.author_url };
+  } catch { return null; }
+}
+
 // Find a channel by name using YouTube's public search page (channels filter).
 async function searchChannel(name) {
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}&sp=EgIQAg%253D%253D&hl=en&gl=IN`;
@@ -433,9 +443,10 @@ function loadDemo() {
 app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex"),
-  resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: "lax" },
+  resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: "lax", maxAge: 30 * 24 * 3600000 },
 }));
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/share", (req, res) => res.sendFile(path.join(__dirname, "public", "share.html")));
 app.get("/vendor/jszip.min.js", (req, res) => res.sendFile(require.resolve("jszip/dist/jszip.min.js")));
 const needLogin = (q, s, n) => q.session.user ? n() : s.status(401).json({ error: "Please log in." });
 const needAdmin = (q, s, n) => q.session.user?.role === "admin" ? n() : s.status(403).json({ error: "Only the administrator can do this." });
@@ -543,6 +554,36 @@ app.post("/api/admin/videos", needLogin, needAdmin, wrap(async (req, res) => {
     save();
   }
   res.json(db().videos[id] || { error: "YouTube did not return this video." });
+}));
+
+// ---------------- YouTube bridge ----------------
+// Videos sent from the admin's own YouTube (phone Share menu or the desktop button).
+app.post("/api/admin/bridge", needLogin, needAdmin, wrap(async (req, res) => {
+  const ids = [...new Set((req.body?.ids || []).map(String).filter(x => /^[A-Za-z0-9_-]{11}$/.test(x)))].slice(0, 100);
+  const status = ["approved", "pending"].includes(req.body?.status) ? req.body.status : "pending";
+  const category = String(req.body?.category || "").slice(0, 40);
+  const d = db(), result = [];
+  for (const group of chunk(ids, 4)) {
+    await Promise.all(group.map(async id => {
+      const ex = d.videos[id];
+      if (ex) {
+        if (!ex.sources.includes("From your YouTube")) ex.sources.push("From your YouTube");
+        if (status === "approved") { ex.status = "approved"; ex.decidedBy = "admin"; }
+        if (category) ex.category = category;
+        result.push({ id, title: ex.title, channel: ex.channel, status: ex.status, existed: true });
+        return;
+      }
+      const info = await fetchInfo(id);
+      d.videos[id] = {
+        id, title: info?.title || "YouTube video " + id, channelId: "", channel: info?.channel || "", channelUrl: info?.channelUrl || "",
+        categoryId: "", category: category || "From YouTube", duration: "", publishedAt: new Date().toISOString(), views: 0,
+        sources: ["From your YouTube"], status, decidedBy: status === "approved" ? "admin" : null, addedAt: new Date().toISOString(),
+      };
+      result.push({ id, title: d.videos[id].title, channel: d.videos[id].channel, status, existed: false });
+    }));
+  }
+  save();
+  res.json(result);
 }));
 
 // channels the admin follows (works without Google sign-in)

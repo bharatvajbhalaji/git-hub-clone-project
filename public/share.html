@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Send to VidGate</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0f7a63">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Figtree:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+<style>
+  .sharebox{max-width:560px;margin:0 auto}
+  .sharebox .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .sharebox .row .btn{flex:1 1 200px}
+  .picked{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:10px}
+  .picked li{display:flex;gap:10px;align-items:center}
+  .picked img{width:96px;flex:0 0 96px;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:var(--chip)}
+  .picked .t{font-weight:600;line-height:1.3}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><div class="brand"><i>▶</i>VidGate</div></header>
+  <div class="toast" id="toast" hidden></div>
+
+  <section class="panel sharebox" id="login" hidden>
+    <h2>Log in as administrator</h2>
+    <p class="note">Only the administrator can send videos from YouTube.</p>
+    <form id="loginForm">
+      <label for="lu">Username</label><input id="lu" autocomplete="username" required>
+      <label for="lp">Password</label><input id="lp" type="password" autocomplete="current-password" required>
+      <button class="btn" style="margin-top:14px">Log in</button>
+      <div class="err" id="loginErr" hidden></div>
+    </form>
+  </section>
+
+  <section class="panel sharebox" id="pick" hidden>
+    <h2 id="pickHead"></h2>
+    <ul class="picked" id="pickList"></ul>
+    <label for="cat">Category</label>
+    <input id="cat" list="cats" placeholder="Category (optional)">
+    <datalist id="cats"></datalist>
+    <div class="row">
+      <button class="btn ok" id="goApprove">Approve for users now</button>
+      <button class="btn ghost" id="goReview">Send to review list</button>
+    </div>
+    <div class="err" id="sendErr" hidden></div>
+  </section>
+
+  <section class="panel sharebox" id="chan" hidden>
+    <h2>Follow this channel?</h2>
+    <p id="chanText" class="note"></p>
+    <div class="row"><button class="btn" id="goChan">Add channel to VidGate</button></div>
+    <div class="err" id="chanErr" hidden></div>
+  </section>
+
+  <section class="panel sharebox" id="done" hidden>
+    <h2 id="doneHead"></h2>
+    <ul class="picked" id="doneList"></ul>
+    <div class="row"><a class="btn" href="/">Open VidGate</a></div>
+    <p class="note" style="margin-top:12px">On a phone, go back to YouTube and share the next video the same way.</p>
+  </section>
+
+  <section class="panel sharebox" id="empty" hidden>
+    <h2>No YouTube video found</h2>
+    <p class="note">Share a video from the YouTube app or youtube.com, or use the "Send page to VidGate" button on YouTube's home page.</p>
+    <div class="row"><a class="btn" href="/">Open VidGate</a></div>
+  </section>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+async function api(url, opts = {}) {
+  const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || "Something went wrong.");
+  return data;
+}
+const showErr = (el, m) => { $(el).textContent = m || ""; $(el).hidden = !m; };
+
+const p = new URLSearchParams(location.search);
+const raw = [p.get("ids"), p.get("url"), p.get("text"), p.get("title")].filter(Boolean).join(" ");
+const ids = [...new Set([
+  ...(p.get("ids") || "").split(",").filter(x => /^[\w-]{11}$/.test(x)),
+  ...[...raw.matchAll(/(?:youtu\.be\/|[?&]v=|\/shorts\/|\/embed\/|\/live\/)([\w-]{11})/g)].map(m => m[1]),
+])];
+const chanLink = (raw.match(/https?:\/\/(?:www\.|m\.)?youtube\.com\/(?:@[\w.-]+|channel\/UC[\w-]{22}|c\/[\w.-]+)/) || [])[0];
+
+function show(id) { ["login", "pick", "chan", "done", "empty"].forEach(s => $(s).hidden = s !== id); }
+
+async function start() {
+  const me = await api("/api/me");
+  if (!me || me.role !== "admin") return show("login");
+  if (ids.length) {
+    $("pickHead").textContent = ids.length === 1 ? "Send this video to VidGate" : `Send ${ids.length} videos to VidGate`;
+    $("pickList").innerHTML = ids.slice(0, 12).map(id => `<li><img src="https://i.ytimg.com/vi/${id}/mqdefault.jpg" alt=""><div class="t">youtu.be/${id}</div></li>`).join("")
+      + (ids.length > 12 ? `<li class="note">and ${ids.length - 12} more</li>` : "");
+    try { const st = await api("/api/admin/status"); $("cats").innerHTML = st.categories.map(c => `<option value="${esc(c)}">`).join(""); } catch {}
+    return show("pick");
+  }
+  if (chanLink) { $("chanText").textContent = chanLink; return show("chan"); }
+  show("empty");
+}
+
+async function send(status) {
+  showErr("sendErr");
+  $("goApprove").disabled = $("goReview").disabled = true;
+  try {
+    const r = await api("/api/admin/bridge", { method: "POST", body: { ids, status, category: $("cat").value.trim() } });
+    $("doneHead").textContent = status === "approved"
+      ? `${r.length} video${r.length === 1 ? "" : "s"} approved. Users can watch now.`
+      : `${r.length} video${r.length === 1 ? "" : "s"} added to the review list.`;
+    $("doneList").innerHTML = r.slice(0, 12).map(v => `<li><img src="https://i.ytimg.com/vi/${v.id}/mqdefault.jpg" alt=""><div><div class="t">${esc(v.title)}</div><div class="note">${esc(v.channel)}</div></div></li>`).join("");
+    show("done");
+  } catch (e) { showErr("sendErr", e.message); $("goApprove").disabled = $("goReview").disabled = false; }
+}
+$("goApprove").onclick = () => send("approved");
+$("goReview").onclick = () => send("pending");
+$("goChan").onclick = async () => {
+  showErr("chanErr");
+  try { const r = await api("/api/admin/channels", { method: "POST", body: { input: chanLink } });
+    $("doneHead").textContent = `${r.title} added. ${r.added} videos are waiting for review.`; $("doneList").innerHTML = ""; show("done"); }
+  catch (e) { showErr("chanErr", e.message); }
+};
+$("loginForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { await api("/api/login", { method: "POST", body: { username: $("lu").value, password: $("lp").value } }); start(); }
+  catch (err) { showErr("loginErr", err.message); }
+});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+start();
+</script>
+</body>
+</html>

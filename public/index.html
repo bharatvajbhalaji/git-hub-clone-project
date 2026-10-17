@@ -6,6 +6,9 @@
 <title>VidGate</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Figtree:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0f7a63">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
 </head>
 <body>
 <div class="wrap">
@@ -35,6 +38,7 @@
       <button data-tab="pending" aria-pressed="true">To review <span class="n" id="nPending">0</span></button>
       <button data-tab="approved" aria-pressed="false">Approved <span class="n" id="nApproved">0</span></button>
       <button data-tab="rejected" aria-pressed="false">Rejected <span class="n" id="nRejected">0</span></button>
+      <button data-tab="bridge" aria-pressed="false">From my YouTube</button>
       <button data-tab="channels" aria-pressed="false">Channels <span class="n" id="nChannels">0</span></button>
       <button data-tab="search" aria-pressed="false">Search YouTube</button>
       <button data-tab="rules" aria-pressed="false">Channel rules</button>
@@ -57,6 +61,29 @@
       </div>
       <div class="agrid" id="agrid"></div>
       <button class="btn ghost more" id="more" hidden>Show more</button>
+    </div>
+
+    <!-- bridge -->
+    <div id="pane-bridge" class="panel" hidden>
+      <h2>Send videos from your own YouTube</h2>
+      <p class="note">Watch YouTube as usual, signed in to your own account. Send any video you like straight to VidGate. No copying links.</p>
+
+      <h3 class="bh">On your phone</h3>
+      <ol class="steps">
+        <li id="instStep">Install VidGate on this phone: <button class="btn" id="installBtn" hidden>Install VidGate</button>
+          <span class="note" id="installHint">In Chrome, open the ⋮ menu and choose <b>Add to Home screen</b> (or <b>Install app</b>).</span></li>
+        <li>Open the <b>YouTube app</b> and play any video, Short, or open a channel.</li>
+        <li>Tap <b>Share</b>, then choose <b>VidGate</b> in the list. If you don't see it, tap <b>More</b>.</li>
+        <li>Pick <b>Approve for users now</b> or <b>Send to review list</b>. Done.</li>
+      </ol>
+
+      <h3 class="bh">On a computer</h3>
+      <ol class="steps">
+        <li>Drag this button to your browser's bookmarks bar: <a class="btn" id="bmk" href="#">Send page to VidGate</a></li>
+        <li>Open <b>youtube.com</b> signed in to your account. Your Home page shows your own recommendations.</li>
+        <li>Click the <b>Send page to VidGate</b> bookmark. Every video on that page (Home, Subscriptions, History, a playlist, search results) goes to VidGate at once, and you choose which to approve.</li>
+      </ol>
+      <p class="note">Tip: open youtube.com/feed/history to send the videos you watched most recently.</p>
     </div>
 
     <!-- channels -->
@@ -151,5 +178,6 @@
 </div>
 <script src="/vendor/jszip.min.js"></script>
 <script src="app.js"></script>
+<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});</script>
 </body>
 </html>

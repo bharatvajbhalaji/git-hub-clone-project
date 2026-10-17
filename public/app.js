@@ -96,6 +96,7 @@ $("tabs").onclick = e => {
   $("pane-search").hidden = tab !== "search";
   $("pane-rules").hidden = tab !== "rules";
   $("pane-channels").hidden = tab !== "channels";
+  $("pane-bridge").hidden = tab !== "bridge";
   if (tab === "channels") loadChannels();
   $("pane-users").hidden = tab !== "users";
   if (tab === "rules") loadRules();
@@ -187,6 +188,17 @@ async function loadRules() {
     <span class="pill">${r.rule === "approve" ? "Always approve" : "Always reject"}</span>
     <button class="btn ghost" data-unrule="${esc(r.channelId)}">Remove rule</button></li>`).join("") : `<li class="note">No rules yet.</li>`;
 }
+
+// bridge: desktop bookmark + phone install
+(function () {
+  const code = `(()=>{const o=${JSON.stringify(location.origin)};const ids=[...new Set([...document.querySelectorAll('a[href*="watch?v="],a[href*="/shorts/"]')].map(a=>(a.href.match(/(?:[?&]v=|\\/shorts\\/)([\\w-]{11})/)||[])[1]).filter(Boolean))].slice(0,100);const one=(location.href.match(/(?:[?&]v=|\\/shorts\\/)([\\w-]{11})/)||[])[1];if(one&&!ids.includes(one))ids.unshift(one);if(!ids.length){alert('No YouTube videos found on this page');return}window.open(o+'/share?ids='+ids.join(','),'_blank')})()`;
+  $("bmk").href = "javascript:" + encodeURIComponent(code);
+  $("bmk").onclick = e => { e.preventDefault(); toast("Drag this button to your bookmarks bar, then click it on youtube.com"); };
+  let deferred = null;
+  window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferred = e; $("installBtn").hidden = false; $("installHint").hidden = true; });
+  $("installBtn").onclick = async () => { if (!deferred) return; deferred.prompt(); await deferred.userChoice; deferred = null; $("installBtn").hidden = true; };
+  if (matchMedia("(display-mode: standalone)").matches) $("instStep").innerHTML = "VidGate is installed on this phone. ✓";
+})();
 
 // channels
 async function loadChannels() {
