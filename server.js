@@ -330,6 +330,9 @@ async function checkChannels(ids) {
       }));
       await wait(600);
     }
+    // YouTube's feeds sometimes answer 404/500 for a while; try the failed channels again in 5 minutes
+    const failedIds = list.filter(id => d.channels[id]?.error);
+    if (failedIds.length) setTimeout(() => { if (!checking) checkChannels(failedIds).catch(() => {}); }, 5 * 60000);
     d.lastFeedCheck = new Date().toISOString();
     d.lastFeedResult = `${list.length} channel${list.length === 1 ? "" : "s"} checked · ${added} new video${added === 1 ? "" : "s"}${failed ? ` · ${failed} could not be read` : ""}`;
     save();
