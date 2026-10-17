@@ -100,6 +100,9 @@ function fmtDuration(iso) {
   const p = n => String(n).padStart(2, "0");
   return h ? `${h}:${p(mi)}:${p(s)}` : `${mi}:${p(s)}`;
 }
+const wait = ms => new Promise(r => setTimeout(r, ms));
+// retry a YouTube request once after a pause; YouTube refuses bursts of requests
+async function retry(fn) { try { return await fn(); } catch (e) { await wait(2500); return fn(); } }
 const chunk = (a, n) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
 const publicVideo = v => ({ ...v, sources: [...new Set(v.sources)] });
 
@@ -251,14 +254,14 @@ async function resolveChannel(input) {
   if (/youtu\.be\/|watch\?|\/shorts\//.test(input)) {
     const vid = youtubeId(input);
     if (!vid) return null;
-    const r = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${vid}&format=json`, { headers: UA });
+    const r = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${vid}&format=json`, { headers: UA, signal: AbortSignal.timeout(15000) });
     if (!r.ok) return null;
     url = (await r.json()).author_url;
   } else if (/^https?:\/\/(www\.|m\.)?youtube\.com\//.test(input)) url = input.replace("://m.", "://www.");
   else if (/^@[\w.-]{3,}$/.test(input)) url = "https://www.youtube.com/" + input;
   else if (input.length >= 2) return (await searchChannel(input))?.id || null;   // a channel name
   else return null;
-  const r = await fetch(url, { headers: UA });
+  const r = await fetch(url, { headers: UA, signal: AbortSignal.timeout(15000) });
   if (!r.ok) return null;
   const html = await r.text();
   m = html.match(/<meta itemprop="identifier" content="(UC[\w-]{22})"/) || html.match(/"externalId":"(UC[\w-]{22})"/)
@@ -269,7 +272,7 @@ async function resolveChannel(input) {
 // Find a channel by name using YouTube's public search page (channels filter).
 async function searchChannel(name) {
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}&sp=EgIQAg%253D%253D&hl=en&gl=IN`;
-  const r = await fetch(url, { headers: UA });
+  const r = await fetch(url, { headers: UA, signal: AbortSignal.timeout(15000) });
   if (!r.ok) return null;
   const html = await r.text();
   const m = html.match(/"channelRenderer":\{"channelId":"(UC[\w-]{22})","title":\{"simpleText":"((?:[^"\\]|\\.)*)"/);
@@ -282,7 +285,7 @@ async function searchChannel(name) {
 }
 
 async function fetchFeed(channelId) {
-  const r = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { headers: UA });
+  const r = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { headers: UA, signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error(r.status === 404 ? "Channel not found" : `YouTube answered ${r.status}`);
   const xml = await r.text();
   const head = xml.split("<entry>")[0];
@@ -303,11 +306,11 @@ async function checkChannels(ids) {
   const d = db(), list = (ids || Object.keys(d.channels)).filter(id => d.channels[id]);
   let added = 0, failed = 0;
   try {
-    for (const group of chunk(list, 6)) {
+    for (const group of chunk(list, 3)) {
       await Promise.all(group.map(async cid => {
         const ch = d.channels[cid];
         try {
-          const f = await fetchFeed(cid);
+          const f = await retry(() => fetchFeed(cid));
           if (f.title) ch.title = f.title;
           ch.lastChecked = new Date().toISOString(); ch.error = null;
           const src = `Channel: ${ch.title}`;
@@ -323,8 +326,9 @@ async function checkChannels(ids) {
             };
             added++;
           }
-        } catch (err) { ch.error = err.message; failed++; }
+        } catch (err) { ch.error = err.cause?.code ? "Could not reach YouTube, will retry" : err.message; failed++; }
       }));
+      await wait(600);
     }
     d.lastFeedCheck = new Date().toISOString();
     d.lastFeedResult = `${list.length} channel${list.length === 1 ? "" : "s"} checked · ${added} new video${added === 1 ? "" : "s"}${failed ? ` · ${failed} could not be read` : ""}`;
@@ -344,16 +348,17 @@ const PACKS = {
 // Adds every suggested channel (used once when the app starts with no channels)
 async function seedPacks() {
   const d = db(), added = [], missed = [];
+  console.log("Adding suggested channels from YouTube search…");
   for (const [cat, names] of Object.entries(PACKS)) {
-    for (const group of chunk(names, 4)) {
-      await Promise.all(group.map(async name => {
-        try {
-          const c = await searchChannel(name);
-          if (!c) return missed.push(name);
-          if (!d.channels[c.id]) d.channels[c.id] = { title: c.title, category: cat, addedAt: new Date().toISOString(), lastChecked: null, error: null };
-          added.push(`${cat}: ${name} -> ${c.title} (${c.id})`);
-        } catch (e) { missed.push(`${name} (${e.message})`); }
-      }));
+    console.log("  searching " + cat);
+    for (const name of names) {
+      try {
+        const c = await retry(() => searchChannel(name));
+        if (!c) { missed.push(name); continue; }
+        if (!d.channels[c.id]) d.channels[c.id] = { title: c.title, category: cat, addedAt: new Date().toISOString(), lastChecked: null, error: null };
+        added.push(`${cat}: ${name} -> ${c.title} (${c.id})`);
+      } catch (e) { missed.push(`${name} (${e.cause?.code || e.message})`); }
+      await wait(900);
     }
   }
   d.seeded = true;
@@ -362,6 +367,8 @@ async function seedPacks() {
   if (missed.length) console.log("Not found: " + missed.join(", "));
   await checkChannels();
   console.log("First check: " + d.lastFeedResult);
+  const bad = Object.values(d.channels).filter(c => c.error);
+  if (bad.length) console.log("Feeds not read: " + bad.map(c => `${c.title} (${c.error})`).join(", "));
 }
 
 // Google Takeout subscriptions.csv: "Channel Id,Channel Url,Channel Title"
@@ -555,11 +562,12 @@ app.post("/api/admin/channels", needLogin, needAdmin, wrap(async (req, res) => {
 app.post("/api/admin/channels/find", needLogin, needAdmin, wrap(async (req, res) => {
   const names = (req.body?.names || []).map(String).filter(Boolean).slice(0, 30);
   const out = [];
-  for (const group of chunk(names, 5)) {
+  for (const group of chunk(names, 2)) {
     out.push(...await Promise.all(group.map(async name => {
-      try { const c = await searchChannel(name); return c ? { name, ...c, already: !!db().channels[c.id] } : { name, notFound: true }; }
+      try { const c = await retry(() => searchChannel(name)); return c ? { name, ...c, already: !!db().channels[c.id] } : { name, notFound: true }; }
       catch { return { name, notFound: true }; }
     })));
+    await wait(500);
   }
   res.json(out);
 }));
