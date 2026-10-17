@@ -335,6 +335,35 @@ async function checkChannels(ids) {
 const feedStale = () => Object.keys(db().channels).length && !checking &&
   (!db().lastFeedCheck || Date.now() - new Date(db().lastFeedCheck) > 60 * 60000);
 
+const PACKS = {
+  "Tamil News": ["Thanthi TV", "Polimer News", "Puthiya Thalaimurai TV", "Sun News Tamil", "News18 Tamil Nadu", "News7 Tamil", "Kalaignar Seithigal", "BBC News Tamil", "Sathiyam TV", "Jaya Plus"],
+  "Tamil Comedy": ["Adithya TV", "Sirippoli TV", "Parithabangal", "Nakkalites", "Black Sheep Tamil", "Temple Monkeys", "Jump Cuts Hari Baskar", "Madras Central"],
+  "TV Shows & Serials": ["Sun TV", "Vijay Television", "Zee Tamil", "Colors Tamil", "Kalaignar TV", "Raj Television", "Jaya TV", "Polimer TV"],
+  "Sports": ["Star Sports Tamil", "Chennai Super Kings", "BCCI", "ICC", "Pro Kabaddi League", "Indian Super League", "Sony Sports Network", "Olympics"],
+};
+// Adds every suggested channel (used once when the app starts with no channels)
+async function seedPacks() {
+  const d = db(), added = [], missed = [];
+  for (const [cat, names] of Object.entries(PACKS)) {
+    for (const group of chunk(names, 4)) {
+      await Promise.all(group.map(async name => {
+        try {
+          const c = await searchChannel(name);
+          if (!c) return missed.push(name);
+          if (!d.channels[c.id]) d.channels[c.id] = { title: c.title, category: cat, addedAt: new Date().toISOString(), lastChecked: null, error: null };
+          added.push(`${cat}: ${name} -> ${c.title} (${c.id})`);
+        } catch (e) { missed.push(`${name} (${e.message})`); }
+      }));
+    }
+  }
+  d.seeded = true;
+  save();
+  console.log(`Suggested channels added: ${added.length}`); added.forEach(a => console.log("  " + a));
+  if (missed.length) console.log("Not found: " + missed.join(", "));
+  await checkChannels();
+  console.log("First check: " + d.lastFeedResult);
+}
+
 // Google Takeout subscriptions.csv: "Channel Id,Channel Url,Channel Title"
 function parseSubscriptions(csv) {
   const out = [];
@@ -611,6 +640,8 @@ app.get("/api/videos", needLogin, (req, res) => {
 init().then(() => app.listen(PORT, () => {
   console.log(pg ? "Saving data to Postgres." : "Saving data to data.json.");
   setInterval(() => { if (feedStale()) checkChannels().catch(() => {}); }, 10 * 60000);
+  if (process.env.SEED_PACKS === "1" && !db().seeded && !Object.keys(db().channels).length)
+    seedPacks().catch(e => console.error("Adding suggested channels failed:", e.message));
   console.log(`VidGate running → http://localhost:${PORT}`);
   console.log("Logins: admin (password from ADMIN_PASSWORD, default admin123) · student / student123");
   console.log(googleConfigured ? "Google sign-in configured." : "Google not configured yet — fill config.json to connect a YouTube account. Demo feed works without it.");
