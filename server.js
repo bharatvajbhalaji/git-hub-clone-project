@@ -294,6 +294,56 @@ async function searchChannel(name) {
   return { id: m[1], title, subscribers: subs };
 }
 
+// "2 min ago", "3 hours ago", "1 day ago", "2 weeks ago" -> approximate ISO time
+function agoToIso(t) {
+  const m = String(t || "").match(/(\d+)\s*(second|minute|min|hour|day|week|month|year)/i);
+  if (!m) return new Date().toISOString();
+  const unit = { second: 1, minute: 60, min: 60, hour: 3600, day: 86400, week: 604800, month: 2592000, year: 31536000 }[m[2].toLowerCase()];
+  return new Date(Date.now() - (+m[1]) * unit * 1000).toISOString();
+}
+const viewsNum = t => { const m = String(t || "").replace(/,/g, "").match(/([\d.]+)\s*([KMB])?/i); if (!m) return 0;
+  return Math.round(+m[1] * ({ K: 1e3, M: 1e6, B: 1e9 }[(m[2] || "").toUpperCase()] || 1)); };
+
+// Latest ~30 videos from the channel's public Videos page.
+async function fetchChannelPage(channelId) {
+  const r = await fetch(`https://www.youtube.com/channel/${channelId}/videos?hl=en&gl=IN`, { headers: UA, signal: AbortSignal.timeout(20000) });
+  if (!r.ok) throw new Error(r.status === 404 ? "Channel not found" : `YouTube answered ${r.status}`);
+  const html = await r.text();
+  const m = html.match(/var ytInitialData = (\{.*?\});<\/script>/s);
+  if (!m) throw new Error("YouTube page had no video list");
+  const data = JSON.parse(m[1]);
+  const title = data?.metadata?.channelMetadataRenderer?.title || "";
+  const entries = [];
+  (function walk(o) {
+    if (!o || typeof o !== "object") return;
+    if (o.lockupViewModel) {
+      const l = o.lockupViewModel;
+      if (l.contentType === "LOCKUP_CONTENT_TYPE_VIDEO" && l.contentId) {
+        const md = l.metadata?.lockupMetadataViewModel;
+        const parts = (md?.metadata?.contentMetadataViewModel?.metadataRows || []).flatMap(r => r.metadataParts || []).map(p => p.text?.content || "");
+        const badge = JSON.stringify(l.contentImage?.thumbnailViewModel?.overlays || []).match(/"thumbnailBadgeViewModel":\{"text":"([^"]+)"/);
+        entries.push({ id: l.contentId, title: md?.title?.content || "", views: viewsNum(parts.find(x => /^[\d.,]+[KMB]?$/i.test(x)) || parts[0]),
+          publishedAt: agoToIso(parts.find(x => /ago/i.test(x))), duration: badge ? badge[1] : "", isShort: false });
+      }
+      return;
+    }
+    if (o.videoRenderer?.videoId) {
+      const v = o.videoRenderer;
+      entries.push({ id: v.videoId, title: v.title?.runs?.[0]?.text || "", views: viewsNum(v.viewCountText?.simpleText),
+        publishedAt: agoToIso(v.publishedTimeText?.simpleText), duration: v.lengthText?.simpleText || "", isShort: false });
+      return;
+    }
+    for (const k in o) walk(o[k]);
+  })(data);
+  return { title, entries };
+}
+
+// Try the Videos page first; fall back to the old RSS feed.
+async function fetchChannelVideos(channelId) {
+  try { const p = await fetchChannelPage(channelId); if (p.entries.length) return p; } catch (e) { var pageErr = e; }
+  try { return await fetchFeed(channelId); } catch (e) { throw pageErr || e; }
+}
+
 async function fetchFeed(channelId) {
   const r = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { headers: UA, signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error(r.status === 404 ? "Channel not found" : `YouTube answered ${r.status}`);
@@ -320,7 +370,7 @@ async function checkChannels(ids) {
       await Promise.all(group.map(async cid => {
         const ch = d.channels[cid];
         try {
-          const f = await retry(() => fetchFeed(cid));
+          const f = await retry(() => fetchChannelVideos(cid));
           if (f.title) ch.title = f.title;
           ch.lastChecked = new Date().toISOString(); ch.error = null;
           const src = `Channel: ${ch.title}`;
@@ -330,7 +380,7 @@ async function checkChannels(ids) {
             const rule = d.channelRules[cid]?.rule;
             d.videos[e.id] = {
               id: e.id, title: e.title, channelId: cid, channel: ch.title, categoryId: "", category: ch.category || "General",
-              duration: e.isShort ? "Short" : "", publishedAt: e.publishedAt, views: e.views, sources: [src],
+              duration: e.isShort ? "Short" : (e.duration || ""), publishedAt: e.publishedAt, views: e.views, sources: [src],
               status: rule === "approve" ? "approved" : rule === "reject" ? "rejected" : "pending",
               decidedBy: rule ? "channel rule" : null, addedAt: new Date().toISOString(),
             };
@@ -601,7 +651,7 @@ app.post("/api/admin/channels", needLogin, needAdmin, wrap(async (req, res) => {
   const d = db();
   if (d.channels[id]) return res.status(409).json({ error: `${d.channels[id].title} is already in your list.` });
   d.channels[id] = { title: id, category: req.body.category || "General", addedAt: new Date().toISOString(), lastChecked: null, error: null };
-  try { await fetchFeed(id); } catch (e) { delete d.channels[id]; return res.status(400).json({ error: "YouTube did not return videos for that channel: " + e.message }); }
+  try { await fetchChannelVideos(id); } catch (e) { delete d.channels[id]; return res.status(400).json({ error: "YouTube did not return videos for that channel: " + e.message }); }
   const wasChecking = checking;
   const added = wasChecking ? 0 : await checkChannels([id]);
   res.json({ id, title: d.channels[id].title, added });
