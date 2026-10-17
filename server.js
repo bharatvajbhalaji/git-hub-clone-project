@@ -255,7 +255,8 @@ async function resolveChannel(input) {
     if (!r.ok) return null;
     url = (await r.json()).author_url;
   } else if (/^https?:\/\/(www\.|m\.)?youtube\.com\//.test(input)) url = input.replace("://m.", "://www.");
-  else if (/^@?[\w.-]{3,}$/.test(input)) url = "https://www.youtube.com/" + (input.startsWith("@") ? input : "@" + input);
+  else if (/^@[\w.-]{3,}$/.test(input)) url = "https://www.youtube.com/" + input;
+  else if (input.length >= 2) return (await searchChannel(input))?.id || null;   // a channel name
   else return null;
   const r = await fetch(url, { headers: UA });
   if (!r.ok) return null;
@@ -263,6 +264,21 @@ async function resolveChannel(input) {
   m = html.match(/<meta itemprop="identifier" content="(UC[\w-]{22})"/) || html.match(/"externalId":"(UC[\w-]{22})"/)
     || html.match(/youtube\.com\/channel\/(UC[\w-]{22})/) || html.match(/"channelId":"(UC[\w-]{22})"/);
   return m ? m[1] : null;
+}
+
+// Find a channel by name using YouTube's public search page (channels filter).
+async function searchChannel(name) {
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}&sp=EgIQAg%253D%253D&hl=en&gl=IN`;
+  const r = await fetch(url, { headers: UA });
+  if (!r.ok) return null;
+  const html = await r.text();
+  const m = html.match(/"channelRenderer":\{"channelId":"(UC[\w-]{22})","title":\{"simpleText":"((?:[^"\\]|\\.)*)"/);
+  if (!m) return null;
+  let title = m[2];
+  try { title = JSON.parse(`"${m[2]}"`); } catch {}
+  const subs = (html.slice(m.index, m.index + 4000).match(/"videoCountText":\{"accessibility":\{"accessibilityData":\{"label":"([^"]+subscribers)"/) || [])[1]
+    || (html.slice(m.index, m.index + 4000).match(/"subscriberCountText":\{[^}]*"simpleText":"([^"]+)"/) || [])[1] || "";
+  return { id: m[1], title, subscribers: subs };
 }
 
 async function fetchFeed(channelId) {
@@ -377,6 +393,7 @@ app.use(session({
   resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: "lax" },
 }));
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/vendor/jszip.min.js", (req, res) => res.sendFile(require.resolve("jszip/dist/jszip.min.js")));
 const needLogin = (q, s, n) => q.session.user ? n() : s.status(401).json({ error: "Please log in." });
 const needAdmin = (q, s, n) => q.session.user?.role === "admin" ? n() : s.status(403).json({ error: "Only the administrator can do this." });
 const wrap = fn => (q, s) => Promise.resolve(fn(q, s)).catch(e => s.status(500).json({ error: e.message }));
@@ -505,8 +522,22 @@ app.post("/api/admin/channels", needLogin, needAdmin, wrap(async (req, res) => {
   const added = wasChecking ? 0 : await checkChannels([id]);
   res.json({ id, title: d.channels[id].title, added });
 }));
+// look up several channel names at once so the admin can confirm before adding
+app.post("/api/admin/channels/find", needLogin, needAdmin, wrap(async (req, res) => {
+  const names = (req.body?.names || []).map(String).filter(Boolean).slice(0, 30);
+  const out = [];
+  for (const group of chunk(names, 5)) {
+    out.push(...await Promise.all(group.map(async name => {
+      try { const c = await searchChannel(name); return c ? { name, ...c, already: !!db().channels[c.id] } : { name, notFound: true }; }
+      catch { return { name, notFound: true }; }
+    })));
+  }
+  res.json(out);
+}));
 app.post("/api/admin/channels/import", needLogin, needAdmin, (req, res) => {
-  const subs = parseSubscriptions(req.body?.csv);
+  const subs = Array.isArray(req.body?.channels)
+    ? req.body.channels.filter(c => /^UC[\w-]{22}$/.test(c?.id)).slice(0, 500).map(c => ({ id: c.id, title: String(c.title || c.id).slice(0, 120) }))
+    : parseSubscriptions(req.body?.csv);
   if (!subs.length) return res.status(400).json({ error: "No channels found in that file. Choose the subscriptions.csv file (or the whole Takeout zip)." });
   const d = db(), fresh = [];
   for (const s of subs) if (!d.channels[s.id]) {

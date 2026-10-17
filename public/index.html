@@ -64,24 +64,44 @@
       <h2>YouTube channels</h2>
       <p class="note">New videos from these channels come into "To review" automatically. VidGate checks them every hour, and whenever you press "Check all channels now".</p>
       <form class="filters" id="chForm">
-        <input id="chIn" placeholder="Channel link or @handle" required>
+        <input id="chIn" placeholder="Channel name, link or @handle" required>
         <input id="chCat" placeholder="Category" value="General">
         <button class="btn" id="chAdd">Add channel</button>
       </form>
       <div class="err" id="chErr" hidden></div>
+      <div class="packs">
+        <div class="note" style="margin-bottom:6px">Suggested channels — VidGate finds them on YouTube, you tick the ones to add:</div>
+        <div class="chips" id="packs">
+          <button data-pack="Tamil News">Tamil News</button>
+          <button data-pack="Tamil Comedy">Tamil Comedy</button>
+          <button data-pack="TV Shows &amp; Serials">TV Shows &amp; Serials</button>
+          <button data-pack="Sports">Sports</button>
+        </div>
+      </div>
       <details class="import">
-        <summary>Bring in every channel a Gmail account subscribes to</summary>
+        <summary>Bring in a Gmail account's most-watched and subscribed channels</summary>
         <ol class="note">
           <li>Open <b>takeout.google.com</b> signed in with that Gmail.</li>
           <li>Press <b>Deselect all</b>, then tick only <b>YouTube and YouTube Music</b>.</li>
-          <li>Press <b>All YouTube data included</b>, keep only <b>subscriptions</b>, then OK.</li>
+          <li>Press <b>All YouTube data included</b> and keep <b>history</b> and <b>subscriptions</b> ticked, then OK.</li>
           <li>Press <b>Next step → Create export</b>. Google emails a download link, usually within a few minutes.</li>
-          <li>Download the zip and choose it below (the zip itself, or the subscriptions.csv inside it).</li>
+          <li>Download the zip and choose it below. VidGate reads it on this phone and ranks channels by how many of their videos were watched.</li>
         </ol>
-        <label for="chFile">Takeout zip or subscriptions.csv</label>
-        <input type="file" id="chFile" accept=".zip,.csv,application/zip,text/csv">
+        <label for="chFile">Takeout zip, watch-history file, or subscriptions.csv</label>
+        <input type="file" id="chFile" accept=".zip,.csv,.json,.html,application/zip,text/csv,application/json,text/html">
         <div class="err" id="impErr" hidden></div>
       </details>
+        <div id="rank" hidden>
+        <div class="bulk" style="margin-top:12px">
+          <b id="rankHead"></b>
+          <label class="chk"><input type="checkbox" id="rankAll"> Select all</label>
+        </div>
+        <ul class="ulist" id="rankList"></ul>
+        <div class="bulk" style="margin-top:12px">
+          <button class="btn" id="rankAdd">Add selected channels</button>
+          <span class="note" id="rankCount"></span>
+        </div>
+      </div>
       <div class="bulk" style="margin-top:14px">
         <button class="btn ghost" id="chCheck">Check all channels now</button>
         <span class="note" id="chInfo"></span>
@@ -129,7 +149,7 @@
     <div class="grid" id="grid"></div>
   </section>
 </div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="/vendor/jszip.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

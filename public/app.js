@@ -211,23 +211,116 @@ $("chForm").addEventListener("submit", async e => {
   } catch (err) { showErr("chErr", err.message); }
   $("chAdd").disabled = false; $("chAdd").textContent = "Add channel";
 });
+// Count watched videos per channel from Takeout watch history (HTML or JSON).
+function rankWatchHistory(text) {
+  const counts = new Map();
+  const bump = (id, title) => { const c = counts.get(id) || { id, title, count: 0 }; c.count++; if (title && c.title === id) c.title = title; counts.set(id, c); };
+  const t = text.trim();
+  if (t.startsWith("[")) {
+    for (const e of JSON.parse(t)) {
+      if (e.details?.some(d => /Ads/i.test(d.name || ""))) continue;
+      const sub = (e.subtitles || [])[0];
+      const id = (String(sub?.url || "").match(/(UC[\w-]{22})/) || [])[1];
+      if (id) bump(id, sub.name || id);
+    }
+  } else {
+    // each watched item: <a href="...watch?v=...">Title</a><br><a href="https://www.youtube.com/channel/UC...">Channel</a>
+    const div = document.createElement("textarea");
+    const dec = s => { div.innerHTML = s; return div.value; };
+    for (const block of t.split(/class="outer-cell/)) {
+      if (/From Google Ads/i.test(block)) continue;
+      const m = block.match(/youtube\.com\/channel\/(UC[\w-]{22})"[^>]*>([^<]*)</);
+      if (m) bump(m[1], dec(m[2]).trim() || m[1]);
+    }
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count);
+}
+
+let ranked = [], rankCategory = null;
+const PACKS = {
+  "Tamil News": ["Thanthi TV", "Polimer News", "Puthiya Thalaimurai TV", "Sun News Tamil", "News18 Tamil Nadu", "News7 Tamil", "Kalaignar Seithigal", "BBC News Tamil", "Sathiyam TV", "Jaya Plus"],
+  "Tamil Comedy": ["Adithya TV", "Sirippoli TV", "Parithabangal", "Nakkalites", "Black Sheep Tamil", "Temple Monkeys", "Jump Cuts Hari Baskar", "Madras Central"],
+  "TV Shows & Serials": ["Sun TV", "Vijay Television", "Zee Tamil", "Colors Tamil", "Kalaignar TV", "Raj Television", "Jaya TV", "Polimer TV"],
+  "Sports": ["Star Sports Tamil", "Chennai Super Kings", "BCCI", "ICC", "Pro Kabaddi League", "Indian Super League", "Sony Sports Network", "Olympics"],
+};
+$("packs").onclick = async e => {
+  const b = e.target.closest("[data-pack]"); if (!b) return;
+  const cat = b.dataset.pack;
+  document.querySelectorAll("#packs button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  showErr("impErr");
+  rankCategory = cat; ranked = [];
+  $("rank").hidden = false; $("rankList").innerHTML = ""; $("rankHead").textContent = `Finding ${cat} channels on YouTube…`;
+  try {
+    const found = await api("/api/admin/channels/find", { method: "POST", body: { names: PACKS[cat] } });
+    const seen = new Set();
+    ranked = found.filter(c => c.notFound || (!seen.has(c.id) && seen.add(c.id)))
+      .map(c => c.notFound ? { notFound: true, title: c.name } : { id: c.id, title: c.title, sub: c.subscribers, searched: c.name, count: 0, already: c.already, pick: !c.already });
+    renderRank();
+    $("rankHead").textContent = `${cat}: ${ranked.filter(c => !c.notFound).length} channels found`;
+  } catch (err) { $("rank").hidden = true; showErr("impErr", err.message); }
+};
+function renderRank() {
+  const box = $("rank");
+  box.hidden = !ranked.length;
+  if (!ranked.length) return;
+  $("rankHead").textContent = `${ranked.length} channels found`;
+  $("rankList").innerHTML = ranked.slice(0, 200).map((c, i) => c.notFound ? `<li class="note">Not found on YouTube: ${esc(c.title)} — add it by link above</li>` : `<li><label class="chk" style="flex:1;min-width:0">
+      <input type="checkbox" data-rk="${i}" ${c.pick ? "checked" : ""}>
+      <span style="min-width:0;overflow-wrap:anywhere"><b>${esc(c.title)}</b>
+      <span class="note">${c.sub ? " · " + esc(c.sub) : ""}${c.searched && c.searched.toLowerCase() !== c.title.toLowerCase() ? ` · searched "${esc(c.searched)}"` : ""}${c.count ? ` · ${c.count} video${c.count === 1 ? "" : "s"} watched` : ""}${c.subscribed ? " · subscribed" : ""}${c.already ? " · already added" : ""}</span></span></label></li>`).join("");
+  const n = ranked.filter(c => c.pick && !c.notFound).length;
+  $("rankCount").textContent = `${n} selected`;
+  $("rankAll").checked = n && ranked.slice(0, 200).every(c => c.pick || c.already || c.notFound);
+}
+$("rankList").addEventListener("change", e => { const i = e.target.dataset.rk; if (i === undefined) return; ranked[i].pick = e.target.checked; renderRank(); });
+$("rankAll").onchange = e => { ranked.slice(0, 200).forEach(c => { if (!c.already && !c.notFound) c.pick = e.target.checked; }); renderRank(); };
+$("rankAdd").onclick = async () => {
+  const pick = ranked.filter(c => c.pick && !c.already && !c.notFound);
+  if (!pick.length) return toast("Select at least one channel");
+  $("rankAdd").disabled = true;
+  try {
+    const r = await api("/api/admin/channels/import", { method: "POST", body: { channels: pick.map(c => ({ id: c.id, title: c.title })), category: rankCategory || $("chCat").value || "General" } });
+    toast(`${r.added} channel${r.added === 1 ? "" : "s"} added · fetching their latest videos…`);
+    pick.forEach(c => { c.pick = false; c.already = true; });
+    renderRank(); adminRefresh(); loadChannels();
+  } catch (err) { showErr("impErr", err.message); }
+  $("rankAdd").disabled = false;
+};
+
 $("chFile").addEventListener("change", async e => {
   const f = e.target.files[0]; if (!f) return;
   showErr("impErr");
+  rankCategory = null; document.querySelectorAll("#packs button").forEach(x => x.setAttribute("aria-pressed", "false"));
+  $("rankHead").textContent = "Reading file…"; $("rank").hidden = false; $("rankList").innerHTML = "";
   try {
-    let csv;
+    let historyText = null, csv = null;
     if (/\.zip$/i.test(f.name) || f.type.includes("zip")) {
-      if (!window.JSZip) throw new Error("Could not open zip files here. Unzip it and choose subscriptions.csv instead.");
+      if (!window.JSZip) throw new Error("Could not open zip files here. Unzip it and choose the watch-history or subscriptions file instead.");
       const zip = await JSZip.loadAsync(f);
-      const entry = Object.values(zip.files).find(z => /subscriptions[^/]*\.csv$/i.test(z.name));
-      if (!entry) throw new Error("No subscriptions file in that zip. In Takeout, make sure 'subscriptions' is ticked under YouTube.");
-      csv = await entry.async("string");
-    } else csv = await f.text();
-    const r = await api("/api/admin/channels/import", { method: "POST", body: { csv, category: $("chCat").value || "General" } });
-    toast(`${r.found} subscriptions found · ${r.added} new channels added · fetching their videos…`);
+      const files = Object.values(zip.files).filter(z => !z.dir);
+      const h = files.find(z => /watch-history\.(json|html)$/i.test(z.name));
+      const s = files.find(z => /subscriptions[^/]*\.csv$/i.test(z.name));
+      if (!h && !s) throw new Error("No watch history or subscriptions in that zip. In Takeout, make sure 'history' and 'subscriptions' are ticked under YouTube.");
+      if (h) historyText = await h.async("string");
+      if (s) csv = await s.async("string");
+    } else if (/\.csv$/i.test(f.name)) csv = await f.text();
+    else historyText = await f.text();
+
+    const existing = new Set((await api("/api/admin/channels")).map(c => c.id));
+    const map = new Map();
+    if (historyText) for (const c of rankWatchHistory(historyText)) map.set(c.id, { ...c, subscribed: false });
+    if (csv) for (const line of csv.split(/\r?\n/)) {
+      const id = (line.match(/(UC[A-Za-z0-9_-]{22})/) || [])[1]; if (!id) continue;
+      const title = line.split(",").slice(2).join(",").replace(/^"|"$/g, "").trim() || id;
+      const c = map.get(id) || { id, title, count: 0 }; c.subscribed = true; map.set(id, c);
+    }
+    ranked = [...map.values()].sort((a, b) => b.count - a.count || (b.subscribed - a.subscribed) || a.title.localeCompare(b.title));
+    if (!ranked.length) throw new Error("No channels found in that file.");
+    // pre-select: channels watched 3+ times, plus subscriptions
+    ranked.forEach(c => { c.already = existing.has(c.id); c.pick = !c.already && (c.count >= 3 || c.subscribed); });
+    renderRank();
     e.target.value = "";
-    adminRefresh(); loadChannels();
-  } catch (err) { showErr("impErr", err.message); }
+  } catch (err) { $("rank").hidden = true; showErr("impErr", err.message); }
 });
 $("chCheck").onclick = startCheck;
 $("chList").addEventListener("change", async e => {
